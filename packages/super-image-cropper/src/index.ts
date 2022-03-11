@@ -28,6 +28,8 @@ export interface ICropOpts {
   y?: number;
   background?: string;
   rotate?: number;
+  left: number;
+  top: number;
 }
 
 export interface IImageData {
@@ -50,18 +52,19 @@ export class SuperImageCropper {
   private preImageSrc = '';
   private frames: ParsedFrame[] = [];
   private commonCropOptions!: ICommonCropOptions;
-  constructor(private inputCropperOptions: ICropperOptions) {}
+  private frameCropperInstance!: FrameCropper;
+  private inputCropperOptions!: ICropperOptions;
 
-  public async crop(): Promise<string> {
+  public async crop(
+    inputCropperOptions: ICropperOptions
+  ): Promise<string> {
+    this.inputCropperOptions = inputCropperOptions;
     await this.init();
     await this.decodeGIF();
     if (await this.checkIsStaticImage()) {
       return this.handleStaticImage()
     } else {
-      console.log(this.cropperInstance)
-      console.log('解码完毕')
       const { resultFrames, frameDelays } = await this.cropFrames();
-      console.log('裁剪完毕', resultFrames)
       return this.saveGif(resultFrames, frameDelays);
     }
   }
@@ -69,7 +72,7 @@ export class SuperImageCropper {
   private async init() {
     this.cropperInstance = this.inputCropperOptions.cropperInstance;
     // 合并初始值
-    const defaultOptions = {
+    const defaultOptions: ICropOpts = {
       width: 100,
       height: 100,
       scaleX: 1,
@@ -85,12 +88,14 @@ export class SuperImageCropper {
       this.inputCropperOptions.cropperJsOpts,
       this.cropperInstance?.getData()
     );
-    mergedCropperJsOpts.left = mergedCropperJsOpts.x;
-    mergedCropperJsOpts.top = mergedCropperJsOpts.y;
+
+    const imageData = this.cropperInstance?.getImageData() ||
+      await getImageInfo(this.inputCropperOptions.src)
+    ;
 
     this.commonCropOptions = {
-      cropperJsOpts: mergedCropperJsOpts as Required<ICropOpts>,
-      imageData: this.cropperInstance?.getImageData() || await getImageInfo(this.inputCropperOptions.src),
+      cropperJsOpts: this.cropDataAdapter(mergedCropperJsOpts, imageData),
+      imageData,
       cropBoxData: this.cropperInstance?.getCropBoxData() || mergedCropperJsOpts,
       withoutCropperJs: !this.cropperInstance
     }
@@ -101,6 +106,17 @@ export class SuperImageCropper {
     // } else {
     //   this.cropperInstance = this.inputCropperOptions.cropperInstance;
     // }
+  }
+
+  private cropDataAdapter(
+    mergedCropperJsOpts: ICropOpts & Cropper.Data,
+    imageData: IImageData
+  ): Required<ICropOpts> {
+    mergedCropperJsOpts.left = mergedCropperJsOpts.x;
+    mergedCropperJsOpts.top = mergedCropperJsOpts.y;
+    mergedCropperJsOpts.width = mergedCropperJsOpts.width || imageData.naturalWidth;
+    mergedCropperJsOpts.height = mergedCropperJsOpts.height || imageData.naturalHeight;
+    return mergedCropperJsOpts as Required<ICropOpts>;
   }
 
   private createCropperInstance(options: ICropperOptions): Promise<CustomCropper> {
@@ -139,7 +155,6 @@ export class SuperImageCropper {
           if (options.cropperJsOpts?.width && this.imageInstance) {
             this.imageInstance.style.width = options.cropperJsOpts.width + 'px';
           }
-          console.log(newInstance.getData(), options.cropperJsOpts, this.imageInstance)
           resolve(newInstance);
         }
       });
@@ -154,11 +169,20 @@ export class SuperImageCropper {
     return decodedGIFFrames;
   }
 
+  private ensureFrameCropperExist() {
+    if (!this.frameCropperInstance) {
+      this.frameCropperInstance = new FrameCropper({
+        commonCropOptions: this.commonCropOptions
+      });
+    }
+  }
+
   private async cropFrames() {
-    const frameCropper = new FrameCropper({
+    this.ensureFrameCropperExist();
+    this.frameCropperInstance.updateConfig({
       commonCropOptions: this.commonCropOptions
     });
-    return frameCropper.cropGif(this.frames);
+    return this.frameCropperInstance.cropGif(this.frames);
   }
 
   private async saveGif(resultFrames: ImageData[], frameDelays: number[]) {
@@ -185,10 +209,12 @@ export class SuperImageCropper {
     canvas.height = imageInfo.imageInstance.height;
     ctx?.drawImage(imageInfo.imageInstance, 0, 0);
 
-    const frameCropper = new FrameCropper({
+    this.ensureFrameCropperExist();
+    // 每次重新裁剪需要更新一下裁剪区域相关数据
+    this.frameCropperInstance.updateConfig({
       commonCropOptions: this.commonCropOptions
     });
-    const croppedImageData = await frameCropper.cropStaticImage(canvas);
+    const croppedImageData = await this.frameCropperInstance.cropStaticImage(canvas);
     ctx?.clearRect(0, 0, canvas.width, canvas.height);
     canvas.width = croppedImageData.width;
     canvas.height = croppedImageData.height;
